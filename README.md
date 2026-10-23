@@ -4,6 +4,10 @@ A liquid-glass logo reveal, rebuilt as a single zero-dependency WebGL page.
 
 A water droplet condenses over a logo, spreads into a rounded glass tile, and lets go. The tile refracts the logo through its thick, rounded edge. Where the logo comes close to a corner, the edge draws it out into the rim with a warm line and a cyan color bleed. The flat face does not distort, so the logo itself stays straight.
 
+## Demo
+
+https://github.com/user-attachments/assets/a77cc3b2-a01b-4dee-a560-cf5a6ed3e65d
+
 ## Usage
 
 Open [`index.html`](./index.html) in a browser. There is no build step and nothing to install.
