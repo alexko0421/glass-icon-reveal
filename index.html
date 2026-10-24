@@ -211,6 +211,8 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px 
 .seg button[aria-checked="true"] { background: var(--seg-on); box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.04); font-weight: 500; }
 .seg.mini { border-radius: 999px; }
 .seg.mini button { border-radius: 999px; padding: 4px 9px; font-size: 12px; font-variant-numeric: tabular-nums; }
+/* Five looks do not fit on one line: three to a row. */
+#look { grid-auto-flow: row; grid-template-columns: repeat(3, 1fr); row-gap: 2px; }
 
 /* Pop-up button */
 .popup {
@@ -327,6 +329,19 @@ const PRESETS = {
       '<path fill="#ffc83d" d="M53 47H91A38 38 0 0 0 53 9Z"/>' +
       '<path fill="#36d38c" d="M53 53V91A38 38 0 0 0 91 53Z"/>' +
       '<path fill="#3d8bff" d="M47 53H9A38 38 0 0 0 47 91Z"/></svg>'
+  },
+  // Placeholders for Nous's own marks, which are not part of this release: an arch and a dot in Nous's
+  // orange for the icon, and a word for the wordmark. Swap in your own.
+  nous: {
+    label: 'Placeholder mark', color: true,
+    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path fill="#de8a66" ' +
+      'd="M18 84V46a26 26 0 0 1 52 0v38H54V46a10 10 0 0 0-20 0v38z"/><circle fill="#de8a66" cx="80" cy="24" r="11"/></svg>'
+  },
+  nousWord: {
+    label: 'Placeholder wordmark', color: false,
+    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 530 139"><text x="265" y="116" text-anchor="middle" ' +
+      'font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-weight="700" font-size="150" letter-spacing="6" ' +
+      'fill="#fff">LOGO</text></svg>'
   },
 };
 
@@ -467,7 +482,8 @@ async function makeLogo(kind, opts) {
     const img = await loadImage(opts.url);
     canvas = fitToTexture(img, img.naturalWidth || TEX, img.naturalHeight || TEX);
   } else {
-    const img = await loadImage(svgToUrl(PRESETS[kind].svg));
+    const preset = PRESETS[kind];
+    const img = await loadImage(preset.src || svgToUrl(preset.svg));
     canvas = fitToTexture(img, img.naturalWidth || TEX, img.naturalHeight || TEX);
   }
   return { canvas, sdf: buildSdf(canvas) };
@@ -527,6 +543,24 @@ uniform float uDissolve;   // 0 → 1 as the glass lets go of the logo
 uniform float uGlow;       // colour bleed in the rim, plate units on screen
 uniform float uFaceDisp;   // lateral colour across the face: red/violet scale apart by ±this
 uniform float uVivid;      // chroma lift of the dispersed light
+uniform float uSquash;     // jelly wobble: how much wider (− taller) the glass is squashed after it lands
+uniform float uFlatten;    // how many times wider than tall the glass is (1 = round)
+uniform float uFringe;     // how far the bend swings when the light path rings (0 = steady)
+uniform float uFringeN;    // bright/dark bands across the rim band while it rings
+uniform float uFringePhase; // where the bands are in their travel toward the rim, radians
+uniform float uRing;       // concentric ripple height while the droplet rings, in droplet radii
+uniform float uRingN;      // ripples from the middle to the rim
+uniform float uRingPhase;  // where the ripples are in their travel outward, radians
+uniform float uOuterRing;  // slope of the ripples in the liquid around a droplet
+uniform float uOuterPhase; // where those ripples are in their travel outward, radians
+uniform float uSpectrum;   // 1 = bent light splits into the spectrum, 0 = it keeps the logo's own colours
+uniform float uTint;       // how strongly the split shows in the look's own warm and cool colours (0 = off)
+uniform vec3 uWarmTint;
+uniform vec3 uCoolTint;
+uniform float uMilk;       // how milky the glass's edge glows on a light backdrop (1 = as measured)
+uniform float uOutline;    // on a light backdrop, draw the glass's edge lines as fine shadows (0 = off)
+uniform float uRimGlass;   // on a light backdrop, how strongly a droplet's rim shows as a thick glass edge
+uniform float uSilhouette; // the dark hairline down the rim's shaded side on a light backdrop (1 = as measured)
 
 uniform float uDepth;
 uniform float uDisp;
@@ -597,12 +631,77 @@ vec2 refractSample(float x, float bwF, float eta, float R, vec2 dirOut, vec2 p, 
   float th = asin(u), thr = asin(u / eta);
   float z = uSlab + bwF * sqrt(1.0 - u * u);
   float off = offMul * z * tan(th - thr);
+  // As the glass lets go the light path rings: the bend swings back and forth across the band, so what
+  // the rim has drawn in breaks into bright and dark bands parallel to the edge that travel out to it.
+  off *= 1.0 + uFringe * sin(6.2831853 * uFringeN * (1.0 - x) - uFringePhase);
   off = off / (1.0 + off / (6.0 * R));
   return p - (dirOut * off + p * dome) * uOptics;
 }
 
+// The liquid in a droplet rings with the sound, as in Apple's film: a couple of standing ripples from its
+// middle to its rim, a little out of round and drifting slowly outward, around a bead where the sound
+// comes up. The surface's slope bends the sight lines (crests magnify and troughs shrink, so what the
+// droplet shows folds into bands) and catches the studio's two side lights. The backdrop around the glass
+// stays still.
+float ringArg(vec2 p) {
+  float r = length(p) / max(uPlateScale, 1e-3);
+  float a = atan(p.y, p.x);
+  float wobble = 0.035 * sin(3.0 * a + 0.4 * uRingPhase) + 0.025 * sin(5.0 * a - 0.7 * uRingPhase + 1.0);
+  return 6.2831853 * uRingN * r * (1.0 + wobble) - uRingPhase;
+}
+// Slope of the ripples inside a droplet, along its radius. They die away at the rim, where the edge does
+// the bending.
+vec2 ringSlope(vec2 p) {
+  float r = length(p) / max(uPlateScale, 1e-3);
+  float edge = 1.0 - smoothstep(0.8, 1.0, r);
+  float bead = r * exp(-r * r / 0.06);
+  return p / max(length(p), 1e-4) * uRing * (sin(ringArg(p)) * edge - 18.0 * bead);
+}
+vec2 rings(vec2 p) { return ringSlope(p) * uPlateScale; }
+// The liquid around a droplet ripples too, in the film: a couple of faint rings outside its rim, 0.4 of
+// its radius apart, running outward and dying away within about its radius. (Not around the tile: there
+// the film's backdrop is still.)
+vec2 outerRipples(vec2 p) {
+  float r = length(p) / max(uPlateScale, 1e-3);
+  float d = r - 1.0;
+  float env = smoothstep(0.0, 0.08, d) * exp(-d / 0.45);
+  return p / max(length(p), 1e-4) * uOuterRing * env * sin(6.2831853 * d / 0.4 - uOuterPhase);
+}
+// Two soft side lights, as in the film's studio: slopes turned to one brighten, slopes turned away
+// darken, and crests catch a highlight. Steep slopes also mirror the surroundings, so on the dark set the
+// gaps between bands and the ring round the bead go dark, as in the film. A flat surface is left exactly
+// as it was.
+vec3 lightLiquid(vec3 c, vec2 slope) {
+  float steep = dot(slope, slope) * 16.0;
+  // (A light set would mirror in as white and wash the mark out, so there the mirroring is held back.)
+  c = mix(c, uBg, clamp(0.6 * steep, 0.0, 0.7) * mix(1.0, 0.2, uLightScene));
+  vec3 n = normalize(vec3(-4.0 * slope, 1.0));
+  vec3 l1 = normalize(vec3(-0.75, 0.25, 0.6)), l2 = normalize(vec3(0.75, 0.15, 0.6));
+  vec3 h1 = normalize(l1 + vec3(0.0, 0.0, 1.0)), h2 = normalize(l2 + vec3(0.0, 0.0, 1.0));
+  // On a light set the shading reads far stronger than the film's faint lines, so it is held back there.
+  float diff = (0.5 * (dot(n, l1) - l1.z) + 0.5 * (dot(n, l2) - l2.z)) * mix(1.0, 0.45, uLightScene);
+  float spec = pow(max(dot(n, h1), 0.0), 60.0) + pow(max(dot(n, h2), 0.0), 60.0)
+             - pow(h1.z, 60.0) - pow(h2.z, 60.0);
+  return clamp(c * (1.0 + 0.8 * diff) + 0.6 * max(spec, 0.0), 0.0, 1.0);
+}
+
 float gauss(float x, float c, float w) { float d = (x - c) / w; return exp(-0.5 * d * d); }
 float band(float x, float a, float b, float w) { return smoothstep(a - w, a, x) * (1.0 - smoothstep(b, b + w, x)); }
+
+// A round droplet's rim in Apple's film is a thick glass edge, not an outline: a soft band that deepens
+// toward the rim, a few fine ripple lines running along it, all lit most on the upper right and the left,
+// and the studio's light caught there as streaks. g is the distance from the middle in rim units (1 on the
+// rim). Returns the band's depth and the streaks' brightness.
+vec2 rimGlass(float g, vec2 p) {
+  float a = atan(p.y, p.x);
+  float lit = 0.35 + 0.65 * max(smoothstep(0.0, 1.0, cos(a - 0.75)), smoothstep(0.2, 1.0, cos(a - 2.95)));
+  float edge = smoothstep(0.78, 0.985, g) * (1.0 - smoothstep(0.985, 1.0, g));
+  float lines = gauss(g, 0.975, 0.006) + 0.8 * gauss(g, 0.945, 0.007) + 0.6 * gauss(g, 0.905, 0.008)
+              + 0.4 * gauss(g, 0.86, 0.009);
+  float streaks = gauss(g, 0.93, 0.025) * pow(max(cos(a - 0.75), 0.0), 8.0)
+                + 0.7 * gauss(g, 0.95, 0.02) * pow(max(cos(a - 2.95), 0.0), 10.0);
+  return vec2((0.55 * edge + 0.45 * lines) * lit, streaks);
+}
 
 // Visible spectrum, red (0) to violet (1), weighted so a dark edge seen through the glass fringes
 // gold → orange → red on one side and cyan → sky → blue → ultramarine on the other (solved over 12
@@ -616,9 +715,14 @@ float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.545
 
 void main() {
   px = 2.0 / uTile;
-  vec2 p = (gl_FragCoord.xy - uCenter) * px;       // plate units, y up
+  vec2 pw = (gl_FragCoord.xy - uCenter) * px;      // plate units, y up
+  // The glass wobbles like jelly after it lands, and a bursting droplet flattens into a wide lens; the logo
+  // below does neither. The glass is worked out in its own squashed frame, and every point it looks at is
+  // mapped back before the logo is sampled, so the bending at its ends is stretched out sideways.
+  vec2 squash = vec2(1.0 / (1.0 + uSquash), (1.0 + uSquash) * uFlatten);
+  vec2 p = pw * squash;
 
-  vec4 lg = logoAt(p, uBlur, px);
+  vec4 lg = logoAt(pw, uBlur, px);
   vec3 plain = mix(uBg, lg.rgb, lg.a * uBare);
 
   vec2 nOut, dg; float g;
@@ -658,8 +762,10 @@ void main() {
   float xf = clamp(s / bwF, 0.0, 1.0);
   // Footprint of one pixel after refraction (centre wavelength). Measured here, in uniform control flow,
   // so the logo is filtered wherever the glass compresses it instead of breaking into shards.
-  vec2 qc = refractSample(xf, bwF, 1.5, R, dirOut, p, dome, offMul);
-  float foot = max(max(length(dFdx(qc)), length(dFdy(qc))), 0.25 * px);
+  vec2 qr = refractSample(xf, bwF, 1.5, R, dirOut, p, dome, offMul);
+  vec2 qc = (qr + rings(p)) / squash;
+  // The ripples bend the view smoothly, so only the refraction's compression needs filtering.
+  float foot = max(max(length(dFdx(qr)), length(dFdy(qr))), 0.25 * px);
 
   // Backdrop: anticipation ghost, ripple, soft lift shadow and glow.
   vec3 bg = uBg;
@@ -685,6 +791,7 @@ void main() {
   bg = mix(bg, haloCol, clamp(uHalo * (0.30 * exp(-outside / (0.025 * uPlateScale)) + 0.07 * exp(-outside / (0.12 * uPlateScale))), 0.0, 1.0) * step(0.0, sd));
 
   vec3 col = bg;
+  float edgeShade = 0.0;
   float soft = px + uBlur * 0.8 + 0.06 * uDissolve * uPlateScale;
   if (sd < soft) {
     // Surface for lighting: a superellipse quarter (k = 2.6), flat towards the face and steep at the rim.
@@ -707,7 +814,8 @@ void main() {
     // the rim band only, a soft glow of fixed size on screen, so colour bleeds smoothly where the fold
     // compresses the view (foot / px is how much it compresses here). It is capped: right at the edge
     // the compression runs past 20×, and an uncapped glow would reach strokes the rim does not see.
-    float rblur = uBlur + 0.05 * length(qc - p) + min(uGlow * uOptics * (1.0 - xf) * foot / px, 0.04);
+    // (The defocus follows the bend through the glass only: ripples move the view without smearing it.)
+    float rblur = uBlur + 0.05 * length(qr / squash - pw) + min(uGlow * uOptics * (1.0 - xf) * foot / px, 0.04);
 
     // Colour. Each wavelength refracts by its own index, so the displacement, and with it the colour
     // split, grows with how strongly the edge bends the view and vanishes on the flat face: the logo
@@ -720,7 +828,8 @@ void main() {
     float cornerW = smoothstep(0.1, 0.9, 4.0 * nOut.x * nOut.x * nOut.y * nOut.y);
     float streak = 0.35 * uStreak * bw * mix(0.15, 1.0, cornerW) * pow(1.0 - xf, 1.5) * uOptics;
     vec2 tangent = vec2(-nOut.y, nOut.x);
-    vec3 acc = vec3(0.0), wsum = vec3(0.0);
+    vec3 acc = vec3(0.0), wsum = vec3(0.0), mid = vec3(0.0);
+    float aWarm = 0.0, aCool = 0.0;   // how much of the logo the warm and the cool half of the light see
     for (int i = 0; i < 20; i++) {
       float lam = (float(i) + 0.5) / 20.0;
       float c = uDisp * (1.0 - 2.0 * lam);   // + red … − violet
@@ -742,17 +851,34 @@ void main() {
       // a broad bar of colour.)
       float faceOnly = smoothstep(0.7, 1.0, xf) * uOptics;
       sp *= 1.0 + uFaceDisp * cf * faceOnly;
+      sp = (sp + rings(p)) / squash;
       vec4 l = logoAt(sp, rblur + 0.12 * streak + uFaceDisp * 0.5 * max(c, 0.0) * faceOnly, foot);
-      vec3 w = spectrum(lam);
-      acc += mix(back, l.rgb, l.a) * w;
+      // Weighting every wavelength alike still bends and smears the light, but adds no colour of its own.
+      vec3 w = mix(vec3(1.0), spectrum(lam), uSpectrum);
+      vec3 seen = mix(back, l.rgb, l.a);
+      acc += seen * w;
       wsum += w;
+      if (i == 10) mid = seen;   // the middle of the spectrum: what the glass shows before it splits
+      if (lam < 0.5) aWarm += l.a; else aCool += l.a;
     }
     vec3 trans = acc / wsum;
-    // Split light reads as colour, not grey: lift the chroma of whatever the dispersion separated
-    // (neutral greys are untouched), so the cyan glow and the gold rim line are as vivid as in the
-    // reference, where the cyan is brighter than the backdrop itself.
+    // A coloured logo has no blue light in it to split off, so a look can lay its own two colours where
+    // the light splits instead (as Nous's right-column dissolve does, orange glow then blue mist): warm
+    // where only the warm half of the light still sees the logo (the line at the rim), cool where only the
+    // cool half does (the glow on its inner side).
+    // Only in the rim band, where the glass draws the logo out: on the flat face the split is a hairline
+    // round every stroke, which the film does not show.
+    float split = (aCool - aWarm) / 10.0;
+    float tintAt = uTint * uOptics * (1.0 - smoothstep(0.45, 0.9, xf));
+    trans = mix(trans, uCoolTint, tintAt * smoothstep(0.0, 0.7, split));
+    trans = mix(trans, uWarmTint, tintAt * smoothstep(0.0, 0.7, -split));
+    // Split light reads as colour, not grey: lift the chroma the dispersion added, so the cyan glow and
+    // the gold rim line are as vivid as in the reference, where the cyan is brighter than the backdrop
+    // itself. Neutral greys are untouched, and so is a coloured logo's own colour: only what the split
+    // adds on top of the middle of the spectrum is lifted.
     float tl = dot(trans, vec3(0.2126, 0.7152, 0.0722));
-    trans = clamp(tl + (trans - tl) * (1.0 + uVivid * uOptics), 0.0, 1.0);
+    vec3 own = mid - dot(mid, vec3(0.2126, 0.7152, 0.0722));
+    trans = clamp(tl + own + (trans - tl - own) * (1.0 + uVivid * uOptics), 0.0, 1.0);
     // A young droplet is milky; it clears as it grows. The haze only ever lightens: on a light backdrop
     // it brightens what is light behind it and leaves dark content dark (in the reference the magnified
     // logo stays navy in the milk); on a dark backdrop it lifts the dark and leaves a white logo white.
@@ -782,13 +908,19 @@ void main() {
     float hw = smoothstep(-0.85, 0.5, dot(nOut, vec2(0.5, 0.866)));
     float tileBand = band(s, 0.016 * sc, 0.075 * sc, 0.022 * sc);
     float dropBand = (1.0 - smoothstep(0.06 * sc, 0.13 * sc, s)) * smoothstep(0.0, 0.004 * sc, s);
-    float glow = mix(0.32 * tileBand, 0.75 * dropBand, uDrop) * lightOnly;
+    float glow = mix(0.32 * tileBand, 0.75 * dropBand, uDrop) * uMilk * lightOnly;
     float edgeLine = gauss(s, 0.005 * sc, 0.0045 * sc);
     float lip = gauss(s, 0.15 * sc, 0.007 * sc) * uDouble * (1.0 - uDrop);
     vec3 lightGlass = mix(trans, vec3(1.0), glow * glassAmt);
     lightGlass += (0.075 * hw * edgeLine + 0.06 * (0.4 + 0.6 * hw) * lip) * lit;
-    lightGlass *= 1.0 - 0.05 * (1.0 - hw) * edgeLine * glassAmt * (1.0 - uDrop);
+    lightGlass *= 1.0 - 0.05 * uSilhouette * (1.0 - hw) * edgeLine * glassAmt * (1.0 - uDrop);
     lightGlass = mix(lightGlass, vec3(1.0), 0.55 * uDrop * glassAmt * edgeLine);
+    // On a light set the film's silver edge lines would vanish into the backdrop, so a look can draw them
+    // as fine shadows instead: the slab's outer edge, the inner lip of its bevel (on a droplet, a ring just
+    // inside its rim), and a faint tint across the bevel between them. They are laid on after the glass,
+    // so they can stay a moment after the bending has gone, as the film's empty slab does.
+    float innerLine = mix(gauss(s, 0.15 * sc, 0.007 * sc) * uDouble, gauss(s, 0.08 * sc, 0.008 * sc), uDrop);
+    edgeShade = (0.16 * edgeLine + 0.10 * innerLine + 0.035 * tileBand) * clamp(0.5 - sd / soft, 0.0, 1.0);
 
     // Dark backdrop: a cool rim light that grows toward the steep edge, and a small key highlight.
     vec3 Nl = normalize(vec3(-grad, 1.0));
@@ -812,6 +944,18 @@ void main() {
   }
 
   vec3 outc = mix(plain, col, uPlateAlpha);
+  outc *= 1.0 - uOutline * edgeShade;
+  // The film's rim glows on black; on a light set its band reads as a cool grey and its light as white
+  // streaks within it.
+  vec2 rimEdge = rimGlass(g, p) * uRimGlass;
+  outc = mix(outc, vec3(0.74, 0.78, 0.84), clamp(rimEdge.x, 0.0, 1.0));
+  outc = mix(outc, vec3(1.0), clamp(rimEdge.y, 0.0, 1.0));
+  // The ripples inside a droplet catch the light while the glass is there.
+  if (uRing > 0.0 || uOuterRing > 0.0) outc = lightLiquid(outc, (ringSlope(p) + outerRipples(p)) * uPlateAlpha);
+  // On a light set the bead in the middle cannot mirror the dark the film's does, so its rim is drawn as a
+  // soft shadow ring round the highlight instead.
+  float rb = length(p) / max(uPlateScale, 1e-3);
+  outc *= 1.0 - 2.2 * uRing * uLightScene * uPlateAlpha * exp(-pow((rb - 0.17) / 0.06, 2.0));
   outc += (hash(gl_FragCoord.xy) - 0.5) / 255.0;
   outColor = vec4(outc, 1.0);
 }`;
@@ -821,6 +965,7 @@ void main() {
  * ------------------------------------------------------------------ */
 const FRAME_KEYS = ['uPlateScale', 'uShapeN', 'uCornerN', 'uOptics', 'uPlateAlpha', 'uLogoHalf', 'uBold', 'uBlur', 'uFrost', 'uDome', 'uDrop', 'uPinch', 'uTilt', 'uBare',
   'uReach', 'uCornerPull', 'uStreak', 'uWiden', 'uSlab', 'uEtaSpread', 'uFocus', 'uFocusK', 'uFocusSplit', 'uRimLine', 'uCornerOn', 'uDissolve', 'uGlow', 'uFaceDisp', 'uVivid',
+  'uSquash', 'uFlatten', 'uFringe', 'uFringeN', 'uFringePhase', 'uRing', 'uRingN', 'uRingPhase', 'uOuterRing', 'uOuterPhase', 'uSpectrum', 'uTint', 'uMilk', 'uOutline', 'uRimGlass', 'uSilhouette',
   'uRim', 'uHalo', 'uShadow', 'uGhost', 'uRipR', 'uRipA', 'uDepth', 'uDisp', 'uDouble', 'uBevelW', 'uSpec', 'uIconPlate',
   'uUseColor', 'uLightScene'];
 
@@ -855,9 +1000,10 @@ function createRenderer(canvas, opts = {}) {
   const colTex = gl.createTexture();
   gl.uniform1i(U.uSdf, 0);
   gl.uniform1i(U.uCol, 1);
-  let hasLogo = false;
+  let current = null;
 
   function setLogo(logo) {
+    current = logo;
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sdfTex);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -877,11 +1023,10 @@ function createRenderer(canvas, opts = {}) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    hasLogo = true;
   }
 
   function render(fr, w, h, tilePx, cx = w / 2, cy = h / 2) {
-    if (!hasLogo) return;
+    if (!current) return;
     gl.viewport(0, 0, w, h);
     gl.uniform2f(U.uCenter, cx, cy);
     gl.uniform1f(U.uTile, tilePx);
@@ -891,12 +1036,14 @@ function createRenderer(canvas, opts = {}) {
     gl.uniform3fv(U.uBg, fr.uBg);
     gl.uniform3fv(U.uPlateCol, fr.uPlateCol);
     gl.uniform3fv(U.uLogoCol, fr.uLogoCol);
+    gl.uniform3fv(U.uWarmTint, fr.uWarmTint);
+    gl.uniform3fv(U.uCoolTint, fr.uCoolTint);
     gl.uniform2fv(U.uLogoOff, fr.uLogoOff);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
   function dispose() { const ext = gl.getExtension('WEBGL_lose_context'); if (ext) ext.loseContext(); }
-  return { gl, setLogo, render, dispose };
+  return { gl, setLogo, render, dispose, get logo() { return current; } };
 }
 
 /* ------------------------------------------------------------------ *
@@ -908,6 +1055,7 @@ const BASE = {
   opticalDepth: 1.1, dispersion: 1.7, glow: 1.25, doubleBevel: 1, bevelWidth: 0.14, corner: 4.8, cornerPull: 2.1, cornerWidth: 2.2, cornerFocus: 0.58, edgeSmear: 2.85, stretch: 0, tilt: 0.35, bulge: 1, specular: 1,
   halo: 0, shadow: 1, ripple: 1,
   bounce: 0, response: 0.34, startSize: 0.2, startZoom: 2.6, present: 1, drift: 0.12, swell: 0.5, focus: 1, hold: 0.8,
+  vibrate: 1, vibrateRate: 6, vibrateTime: 0.8, wave: 1, waveDensity: 4, rings: 0, spectrum: 1,
   background: '#e9e9eb', plateColor: '#ffffff', logoColor: '#0e1428',
 };
 const LOOKS = {
@@ -919,7 +1067,43 @@ const LOOKS = {
     glow: 0.45, corner: 5, cornerPull: 1.4, edgeSmear: 1.2, tilt: 0, cornerWidth: 1.2, cornerFocus: 0.4,
     background: '#000000', plateColor: '#05070b', logoColor: '#ffffff',
   },
+  // Apple Music's wordmark reveal: no tile. A small ball lens condenses over the middle of the word, then
+  // bursts to the word's full width so its ends sit in the rim and fan out, rings, and lets go.
+  wordmark: {
+    // As accepted (artifact version 3): a small ball that bursts over the word at 0.26 s, its ends fanning
+    // out in colour and then in fine vertical bands as the glass lets go, at rest by 1.8 s.
+    ...BASE, ball: true, burst: 0.26, logo: 'text', text: 'music', tileSize: 320, logoScale: 0.95, finalScale: 1,
+    startSize: 0.17, startZoom: 5, present: 0.85, drift: 0.04, focus: 0.5,
+    halo: 0.5, shadow: 0, ripple: 0, vibrate: 0,
+    corner: 2, cornerPull: 1, cornerWidth: 0, edgeSmear: 1.2, tilt: 0, stretch: 0,
+    bevelWidth: 0.3, dispersion: 1.7, glow: 1,
+    background: '#000000', plateColor: '#000000', logoColor: '#ffffff',
+  },
 };
+// Nous: Apple Music's two reveals back to back, with Nous's own marks in its orange on the warm white of
+// its app icon (AppIcon.icon). The N condenses out of a droplet into clear glass and lets go; then it
+// shrinks away and the Wordmark look plays over NOUS.
+LOOKS.nous = {
+  // Timed to Apple's film: the droplet appears at 0.17 s already 0.85 of the tile wide and clear, swells
+  // past the tile and spreads into it by 0.4 s with the mark reaching its edges, holds until 1.3 s, lets
+  // go within 0.1 s, and the mark shrinks away over 1.4–1.52 s; the wordmark's droplet follows at 1.55 s.
+  // The mark takes 0.62 of the tile, as the note does, so only its corners reach into the rim. The film has
+  // no bands at the rim, no milky droplet and no anticipation ghost; on the light set its silver edges
+  // are drawn as fine shadows.
+  ...LOOKS.light, logo: 'nous', originalColors: true, logoScale: 0.68, finalScale: 1, focus: 0,
+  start: 0.15, startSize: 0.5, over: 0.08, response: 0.35, spreadAt: 0.2, spread: 0.1, zoomTime: 0.4,
+  present: 1.0, letGo: 0.15, cut: 0.22, gap: 0.15, milk: 0, wave: 0, ghost: 0, outline: 1,
+  // The Wordmark's clean glass on the N's tile: its corners bend light no harder than its sides and only a
+  // short smear runs along the rim, as on the Wordmark's lens, so the N stays whole instead of being drawn
+  // out into the corners.
+  corners: 0, cornerPull: 1, cornerWidth: 0, cornerFocus: 0.65, edgeSmear: 1.2, tilt: 0, glow: 1,
+  // The light still bends and smears, but in Nous's orange: a split spectrum's violet and cyan would fight it.
+  background: '#fdfbf7', spectrum: 0, then: 'wordmark',
+  // The second half is the Wordmark look unchanged, with NOUS in Nous's orange.
+  thenSet: { logo: 'nousWord', logoColor: '#de8a66' },
+};
+// The same on black, as Apple's film is: there the glass, its edges and the light it bends can glow.
+LOOKS.nousDark = { ...LOOKS.nous, background: '#000000' };
 
 const SCHEMA = [
   { title: 'Logo', rows: [
@@ -959,6 +1143,13 @@ const SCHEMA = [
     { key: 'drift', type: 'slider', label: 'Glass drift', min: 0, max: 0.3, step: 0.01, digits: 2 },
     { key: 'focus', type: 'slider', label: 'Focus pull', min: 0, max: 2, step: 0.05, digits: 2 },
     { key: 'swell', type: 'slider', label: 'Stroke swell', min: 0, max: 3, step: 0.05, digits: 2 },
+    { key: 'vibrate', type: 'slider', label: 'Vibration', min: 0, max: 3, step: 0.05, digits: 2 },
+    { key: 'vibrateRate', type: 'slider', label: 'Vibration speed', unit: ' Hz', min: 2, max: 14, step: 0.5, digits: 1 },
+    { key: 'vibrateTime', type: 'slider', label: 'Vibration time', unit: ' s', min: 0.2, max: 2.5, step: 0.05, digits: 2 },
+    { key: 'wave', type: 'slider', label: 'Refraction ripple', min: 0, max: 3, step: 0.05, digits: 2 },
+    { key: 'waveDensity', type: 'slider', label: 'Ripple density', min: 1, max: 10, step: 0.5, digits: 1 },
+    { key: 'rings', type: 'slider', label: 'Droplet rings', min: 0, max: 3, step: 0.05, digits: 2 },
+    { key: 'spectrum', type: 'slider', label: 'Spectrum', min: 0, max: 1, step: 0.05, digits: 2 },
     { key: 'hold', type: 'slider', label: 'Loop pause', unit: ' s', min: 0, max: 3, step: 0.1, digits: 1 },
   ]},
   { title: 'Colors', rows: [
@@ -970,7 +1161,20 @@ const SCHEMA = [
 
 const TAIL = 0.95;    // from the glass letting go to everything at rest, seconds
 const OUTRO = 0.35;   // loop only: the logo blurs away before the next reveal
-const endOf = P => P.present + TAIL;
+// A look with `then` plays a second reveal once its own glass has let go. As in Apple's film, the first
+// logo shrinks away into the middle over SEQ_GAP and the second reveal's droplet starts where it went,
+// on the same backdrop, so the swap is never seen.
+const SEQ_CUT = 0.35;   // from the first glass letting go to the first logo shrinking away, seconds
+const SEQ_GAP = 0.15;   // the shrink itself
+// The second reveal plays that look as it is, on the first look's backdrop and with its colour handling and
+// anticipation ghost (on a light backdrop the ghost flashes as a pale disc), then takes the look's own
+// changes for it from `thenSet` (its logo).
+const nextOf = P => ({ ...LOOKS[P.then], background: P.background, spectrum: P.spectrum, tint: P.tint, ghost: P.ghost,
+                       start: 0, ...P.thenSet });
+const startOf = P => P.start || 0;
+const cutOf = P => startOf(P) + P.present + (P.cut ?? SEQ_CUT);
+const gapOf = P => P.gap ?? SEQ_GAP;
+const endOf = P => P.then ? cutOf(P) + gapOf(P) + endOf(nextOf(P)) : startOf(P) + P.present + TAIL;
 
 const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
 const mix = (a, b, t) => a + (b - a) * t;
@@ -1017,33 +1221,61 @@ function timeToReach(level, response, damping) {
 //   settle    then keeps sinking a few percent (the measured slow shrink) until the exit takes over
 //   release   the glass lets go: the rim narrows to arcs and dissolves; the exit shrink starts just
 //             before it, from rest, so the logo's motion carries straight on into it
-function frameAt(T, P, outro = 0) {
+// `leave` 0 → 1 shrinks the finished logo away into the middle, for the hand-off to a second reveal.
+function frameAt(T, P, outro = 0, leave = 0) {
+  T -= P.start || 0;   // a look may start on an empty backdrop first
   const tx = P.present;
   const damping = 1 - P.bounce;
-  const grow = spring(T + 0.01, P.response, damping);
+  // The wordmark look keeps the glass a round ball lens. It condenses slowly over the middle of the word,
+  // then bursts to the word's full width (as measured off Apple's capture: a fifth of the word wide at
+  // the start, a third by 0.26 s, the whole word by 0.43 s).
+  const ball = !!P.ball;
+  const grow = ball ? 0.2 * spring(T + 0.01, 0.5, 1) + 0.8 * spring(T - P.burst, 0.3, 1)
+                    : spring(T + 0.01, P.response, damping);
   const tl = timeToReach(0.85, P.response, damping) - 0.01;   // the droplet lands: the ripple leaves
-  const tm = timeToReach(0.92, P.response, damping) - 0.01;   // and spreads into the tile
-  const morph = spring(T - tm, 0.3, 1);
+  const tm = P.spreadAt ?? timeToReach(0.92, P.response, damping) - 0.01;   // and spreads into the tile
+  const morph = spring(T - (ball ? P.burst - 0.06 : tm), P.spread ?? 0.3, 1);
   // The droplet's own look (milky body, bright rim, soft shadow) gives way to clear glass as it spreads.
   const drop = 1 - smooth(0.05, 1, morph);
   const appear = smooth(0, 0.06, T);
   const drift = P.drift * spring(T - 0.25, 1.5, 1);
-  const zoomIn = spring(T, 0.7, 1);
+  const zoomIn = spring(T, P.zoomTime ?? (ball ? 0.35 : 0.7), 1);
   const settle = spring(T - 0.4, 1.6, 1);
   // The exit, as measured: the glass lets go: the rim narrows into corner arcs (1.1–1.25 s) and is gone
   // by 1.3 s, the logo shrinking.
   const exit = spring(T - tx, 0.8, 1);
-  const release = spring(T - tx - 0.05, 0.5, 1);
+  const release = spring(T - tx - 0.05, P.letGo ?? 0.5, 1);
   const dome = 0.15 * P.bulge * (1 - smooth(0.4, 0.95, grow));   // the young droplet's barrel squeeze
-  const view = (1 + (P.startZoom - 1) * (1 - zoomIn)) * (1 - 0.045 * settle) * mix(1, P.finalScale, exit)
-             * (1 - 0.06 * outro);
+  const view = (1 + (P.startZoom - 1) * (1 - zoomIn)) * (1 - (P.settleAmt ?? 0.045) * settle) * mix(1, P.finalScale, exit)
+             * (1 - 0.06 * outro) * (1 - 0.7 * leave * leave);
   const preset = PRESETS[P.logo] || {};
   const off = preset.offset || [0, 0], ls = preset.lensShift || [0, 0];
   // While the droplet still curves all over, its whole edge is curved glass; the band narrows to the
   // tile's bevel as it spreads.
-  const bandW = mix(P.bevelWidth, Math.max(P.bevelWidth, 0.4), drop);
-  const plateScale = mix(P.startSize, 1, grow) * (1 + drift) * (1 + 0.14 * release);
+  // A ball lens that is pushed open (flatten) spreads wider than the word as it does, with a broad, gentle
+  // band at its ends: the word's last letters are drawn out smoothly sideways instead of folding back.
+  const open = ball && P.flatten ? smooth(P.burst - 0.05, P.burst + 0.12, T) : 0;
+  // A ball lens may keep its band thin until it has burst (dropBevel), so what it shows reads to its edge.
+  const bandW = ball && P.dropBevel != null
+    ? P.bevelWidth * mix(P.dropBevel, P.openBevel ?? 1, smooth(P.burst + 0.05, P.burst + 0.2, T))
+    : mix(P.bevelWidth, Math.max(P.bevelWidth, 0.4), drop);
+  // A droplet may swell past the tile it then settles into (Apple's reaches 1.15× before it spreads).
+  const plateScale = mix(P.startSize, 1, grow) * (1 + (P.over || 0) * (1 - morph)) * (1 + drift) * (1 + 0.14 * release)
+                   * mix(1, P.openWide ?? 1, open);
   const light = luminance(hexToRgb(P.background)) > 0.5 ? 1 : 0;
+  // The landing rings the glass: it squashes and stretches like jelly, dying away over the vibration time.
+  // The squash starts at zero with the impact's speed and goes with the glass when it lets go.
+  const since = Math.max(0, T - tm);
+  const ring = T > tm ? Math.exp(-since / (P.vibrateTime / 4)) * (1 - release) : 0;
+  // As the glass lets go its light path rings, as in Apple's capture: over its last half second the
+  // smears at the rim break into bands that travel out to the edge and grow denser (about 3 → 7).
+  const fringeT = T - (tx - 0.2);
+  const fringeOn = smooth(0, 0.2, fringeT);
+  const fringeDense = smooth(0, 0.6, fringeT);
+  // While it is still a droplet the liquid rings with the sound (in Apple's film, from the moment the
+  // wordmark's ball appears until it has burst over the word), the ripples drifting outward 1.5 a second.
+  const ringsUntil = ball ? P.burst : tm;
+  const ringsOn = smooth(0, 0.04, T) * (1 - smooth(ringsUntil - 0.1, ringsUntil + 0.07, T));
   return {
     uPlateScale: plateScale,
     uShapeN: mix(2, P.corner, morph),
@@ -1064,35 +1296,66 @@ function frameAt(T, P, outro = 0) {
     uDome: dome,
     uDrop: drop,
     uRim: 1 + 0.8 * drop,
-    uHalo: P.halo * (0.5 + 0.5 * drop),
+    // A ball lens over a word glows only while it is a small droplet; once it bursts it all but vanishes,
+    // leaving just its ends where they bend the word.
+    uHalo: P.halo * (ball ? drop : 0.5 + 0.5 * drop),
     // A soft shadow spreads around the droplet while it is round (5–7 levels on the light backdrop,
     // reaching well past its edge) and lifts as it spreads into the tile.
     uShadow: P.shadow * smooth(0.45, 0.8, grow) * (1 - smooth(0, 0.6, morph)),
-    uGhost: smooth(0, 0.03, T) * (1 - smooth(0.04, 0.08, T)),
+    uGhost: (P.ghost ?? 1) * smooth(0, 0.03, T) * (1 - smooth(0.04, 0.08, T)),
     uRipR: 1 + 0.9 * Math.max(0, T - tl),
     uRipA: P.ripple * smooth(tl, tl + 0.06, T) * Math.exp(-Math.max(0, T - tl) / 0.5),
-    uBare: smooth(tx - 0.2, tx, T) * (1 - outro),
+    uBare: smooth(tx - 0.2, tx, T) * (1 - outro) * (1 - smooth(0.9, 1, leave)),
     // The pull depth stays sized by the full band, so when the band narrows on the way out it thins into arcs.
     uReach: bandW * plateScale,
     uCornerPull: P.cornerPull,
     uStreak: P.edgeSmear,
     uWiden: P.cornerWidth,
-    uSlab: 0.3 * P.opticalDepth,
+    uSlab: 0.3 * mix(P.opticalDepth, P.openDepth ?? P.opticalDepth, open),
     uEtaSpread: 0.06,
     uFocus: P.cornerFocus,
     uFocusK: 1.0,
     uFocusSplit: 0.056 * P.glow,
     uRimLine: 0.09,
-    uCornerOn: smooth(0.35, 1, morph),
+    // A look may keep the tile's corners from bending light harder than its sides (corners: 0), as the
+    // round droplet's edge does.
+    uCornerOn: ball ? 0 : (P.corners ?? 1) * smooth(0.35, 1, morph),
     uGlow: 0.012 * P.glow,
     uFaceDisp: 0.012 * P.dispersion,
     uVivid: 0.85,
+    uSquash: 0.05 * P.vibrate * ring * Math.sin(2 * Math.PI * since * P.vibrateRate),
+    // In the film the bursting droplet does not swell round over the word: the water is pushed open
+    // sideways into a flat lens, so the word's ends are drawn out in long horizontal streaks.
+    uFlatten: 1 + ((P.flatten ?? 1) - 1) * open,
+    uFringe: 0.7 * P.wave * fringeOn,
+    uFringeN: P.waveDensity * mix(0.75, 1.75, fringeDense),
+    uFringePhase: 2 * Math.PI * 2.5 * Math.max(0, fringeT),
+    uRing: 0.1 * P.rings * ringsOn,
+    uSpectrum: P.spectrum,
+    uTint: P.tint || 0,
+    // The light and dark values of the right-column dissolve's orange glow and blue mist.
+    uWarmTint: hexToRgb(light ? (P.warmTint || '#e28048') : (P.warmTintDark || '#ff965c')),
+    uCoolTint: hexToRgb(light ? (P.coolTint || '#6898ec') : (P.coolTintDark || '#6096ff')),
+    uMilk: P.milk ?? 1,
+    // The glass's edge lines fade within 0.3 s of it letting go, as its silver edges do in the film.
+    uOutline: (P.outline || 0) * appear * (1 - smooth(tx, tx + 0.3, T)),
+    // The rim's glass edge is at its fullest as the droplet bursts and gone 0.15 s later, as in the film
+    // (1.9 s, 2.0 s, 2.1 s), while the glass over the word lingers on.
+    uRimGlass: P.rimGlass && ball ? 0.42 * P.rimGlass * appear * (1 - smooth(P.burst - 0.02, P.burst + 0.15, T)) : 0,
+    // A rim drawn as a glass edge has no hairline: it would outlast the edge as the glass lets go.
+    uSilhouette: P.rimGlass ? 0 : 1,
+    uRingN: 2.5,
+    uRingPhase: 2 * Math.PI * 1.5 * T,
+    // Outside a ball lens the liquid ripples from the moment it appears until it bursts.
+    uOuterRing: ball ? 0.09 * (P.outerRings ?? 0) * smooth(0, 0.06, T) * (1 - smooth(P.burst - 0.02, P.burst + 0.12, T)) : 0,
+    uOuterPhase: 2 * Math.PI * 2.5 * T,
     uDissolve: release,
     uDepth: P.opticalDepth,
     uDisp: P.dispersion,
     uDouble: P.doubleBevel,
     uBevelW: bandW * (1 - release),
-    uSpec: P.specular,
+    // (Once pushed open, the glass itself shows no edge in the film: only what it bends is seen.)
+    uSpec: P.specular * (ball ? mix(0.3, 1, drop) : 1) * (1 - open),
     uIconPlate: P.iconPlate ? 1 : 0,
     uUseColor: P.originalColors ? 1 : 0,
     uLightScene: light,
@@ -1102,10 +1365,30 @@ function frameAt(T, P, outro = 0) {
   };
 }
 
+// What is on screen at T: which reveal (its look) and that reveal's frame.
+function shotAt(T, P, outro = 0) {
+  if (P.then && T >= cutOf(P) + gapOf(P)) {
+    const next = nextOf(P);
+    return { look: next, second: true, frame: frameAt(T - cutOf(P) - gapOf(P), next, outro) };
+  }
+  if (P.then && T > cutOf(P)) return { look: P, second: false, frame: frameAt(cutOf(P), P, 0, (T - cutOf(P)) / gapOf(P)) };
+  return { look: P, second: false, frame: frameAt(T, P, outro) };
+}
+
+// Render the shot at T with r, giving it the logo that reveal shows. The swap happens while the
+// backdrop is empty, so re-uploading the logo there costs nothing visible.
+function renderShot(r, T, outro, w, h, tile, cx, cy) {
+  const shot = shotAt(T, P, outro);
+  const logo = shot.second ? thenLogoData : logoData;
+  if (!logo) return;
+  if (r.logo !== logo) r.setLogo(logo);
+  r.render(shot.frame, w, h, tile * shot.look.tileSize / P.tileSize, cx, cy);
+}
+
 /* ------------------------------------------------------------------ *
  * App state
  * ------------------------------------------------------------------ */
-const STORE = 'glass-icon-reveal:v3';
+const STORE = 'glass-icon-reveal:v4';
 let look = 'light';
 let P = { ...LOOKS.light };
 try {
@@ -1115,6 +1398,7 @@ try {
 if (P.logo === 'upload') P.logo = LOOKS[look].logo;
 let uploadUrl = null;
 let logoData = null;
+let thenLogoData = null;   // the second reveal's logo, for a look with `then`
 
 const app = document.getElementById('app');
 const stage = document.getElementById('stage');
@@ -1157,8 +1441,11 @@ function buildInspector() {
 
   const lookGroup = el(`<section class="group"><div class="field"><span class="f-label">Look</span></div>
     <div class="seg" role="radiogroup" aria-label="Look" id="look">
-      <button type="button" role="radio" data-look="light" id="c-look-light">Light glass</button>
-      <button type="button" role="radio" data-look="dark" id="c-look-dark">Dark glass</button>
+      <button type="button" role="radio" data-look="light" id="c-look-light">Light</button>
+      <button type="button" role="radio" data-look="dark" id="c-look-dark">Dark</button>
+      <button type="button" role="radio" data-look="wordmark" id="c-look-wordmark">Wordmark</button>
+      <button type="button" role="radio" data-look="nous" id="c-look-nous">Nous</button>
+      <button type="button" role="radio" data-look="nousDark" id="c-look-nousDark">Nous dark</button>
     </div></section>`);
   lookGroup.querySelectorAll('[data-look]').forEach(b => b.addEventListener('click', () => setLook(b.dataset.look)));
   groupsEl.appendChild(lookGroup);
@@ -1250,11 +1537,13 @@ function syncAll() {
 
 function setLook(name) {
   const logoBefore = P.logo;
+  // Text the viewer typed carries over; a look's own sample word does not.
+  const text = P.text === LOOKS[look].text ? LOOKS[name].text : P.text;
   look = name;
-  P = { ...LOOKS[name], text: P.text };
+  P = { ...LOOKS[name], text };
   if (logoBefore === 'upload') { P.logo = 'upload'; }
   syncAll(); persist();
-  if (P.logo !== logoBefore) refreshLogo();
+  refreshLogo();
   dirty = true; replay();
 }
 
@@ -1262,10 +1551,13 @@ let logoJob = 0;
 async function refreshLogo() {
   const job = ++logoJob;
   try {
-    const data = await makeLogo(P.logo, { text: P.text, url: uploadUrl });
+    const [data, thenData] = await Promise.all([
+      makeLogo(P.logo, { text: P.text, url: uploadUrl }),
+      P.then ? makeLogo(nextOf(P).logo, {}) : null,
+    ]);
     if (job !== logoJob) return;
     logoData = data;
-    if (renderer) renderer.setLogo(data);
+    thenLogoData = thenData;
     dirty = true;
   } catch (e) {
     setStatus(e.message || 'This logo could not be loaded.');
@@ -1419,7 +1711,7 @@ function tick(now) {
   }
   const L = layout();
   if (dirty && renderer && logoData) {
-    renderer.render(frameAt(time, P, outro), view.width, view.height, L.tile, L.cx, L.cy);
+    renderShot(renderer, time, outro, view.width, view.height, L.tile, L.cx, L.cy);
     scrub.value = String(time);
     scrub.style.setProperty('--p', (time / endOf(P) * 100).toFixed(2) + '%');
     clock.textContent = time.toFixed(2) + ' s';
@@ -1449,8 +1741,7 @@ function wireExport() {
     c.width = side; c.height = side;
     const r = createRenderer(c, { preserve: true });
     if (!r) return;
-    r.setLogo(logoData);
-    r.render(frameAt(time, P), side, side, P.tileSize * 2);
+    renderShot(r, time, 0, side, side, P.tileSize * 2);
     const blob = await new Promise(res => c.toBlob(res, 'image/png'));
     r.dispose();
     offerFile(blob, `glass-reveal-${time.toFixed(2)}s.png`);
@@ -1469,9 +1760,8 @@ function wireExport() {
     const c = document.createElement('canvas');
     c.width = side; c.height = side;
     const r = createRenderer(c);
-    r.setLogo(logoData);
     const end = endOf(P), total = end + 0.3;
-    r.render(frameAt(0, P), side, side, P.tileSize * 2);
+    renderShot(r, 0, 0, side, side, P.tileSize * 2);
     const stream = c.captureStream(60);
     const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 16e6 });
     const chunks = [];
@@ -1482,7 +1772,7 @@ function wireExport() {
     await new Promise(res => {
       const step = now => {
         const T = Math.max(0, (now - t0) / 1000 * speed);
-        r.render(frameAt(Math.min(T, end), P), side, side, P.tileSize * 2);
+        renderShot(r, Math.min(T, end), 0, side, side, P.tileSize * 2);
         setStatus(`Recording… ${Math.min(T, total).toFixed(2)} s`);
         if (T < total) requestAnimationFrame(step); else res();
       };
@@ -1523,9 +1813,8 @@ window.glassReveal = {
       snapCanvas = document.createElement('canvas');
       snapCanvas.width = snapCanvas.height = side;
       snapRenderer = createRenderer(snapCanvas, { preserve: true });
-      snapRenderer.setLogo(logoData);
     }
-    snapRenderer.render(frameAt(t, P, fade), side, side, side / 1.9);
+    renderShot(snapRenderer, t, fade, side, side, side / 1.9);
     return new Promise(res => snapCanvas.toBlob(res, 'image/png'));
   },
 };

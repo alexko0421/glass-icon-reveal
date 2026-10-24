@@ -5,7 +5,7 @@ Thanks for contributing to Glass Icon Reveal.
 ## Before opening a pull request
 
 1. Keep the tool a single `index.html` with no runtime dependencies.
-2. Preserve keyboard control, Reduce Motion and Reduce Transparency behavior, and both looks.
+2. Preserve keyboard control, Reduce Motion and Reduce Transparency behavior, and every look.
 3. Play a full reveal in Chrome, Safari, and Firefox and check that the console shows no shader or script errors.
 
 ## Pull requests
